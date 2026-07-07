@@ -35,10 +35,39 @@ export type PhotoTransform = {
   offsetY: number; // range: -1.0 to 1.0
 };
 
-export type FooterCustomization = {
+export type EffectId = 'thermal' | 'mirror' | 'pixelate' | 'vhs';
+
+export type FontChoice = 'Inter' | 'Playfair Display' | 'JetBrains Mono' | 'Great Vibes';
+
+export type CaptionCustomization = {
   text: string;
-  fontFamily: string;
-  color: string; // custom hex or empty string for default
-  alignment: 'left' | 'center' | 'right';
-  showDate: boolean;
+  fontFamily: FontChoice;
+};
+
+export type FrameOverrides = {
+  backgroundColor?: string;
+  cornerShape: 'square' | 'rounded' | 'pill';
+  innerGapPx: number;
+  borderPx: number;
+};
+
+export type StickerSize = 's' | 'm' | 'l';
+
+export type PlacedSticker = {
+  id: string;
+  assetId: string;
+  cx: number;
+  cy: number;
+  size: StickerSize;
+};
+
+export type CustomizationState = {
+  layout: import('./frames').FrameLayout;
+  frameId: string;
+  filterId: string;
+  effectId: EffectId | null;
+  photoTransforms: Record<string, PhotoTransform>;
+  caption: CaptionCustomization;
+  frameOverrides: FrameOverrides;
+  placedStickers: PlacedSticker[];
 };

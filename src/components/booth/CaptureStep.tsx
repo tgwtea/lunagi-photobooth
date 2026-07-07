@@ -17,6 +17,9 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
   const [permissionStatus, setPermissionStatus] = useState<'pending' | 'granted' | 'denied'>('pending');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [countdown, setCountdown] = useState(5);
+  const [phase, setPhase] = useState<'countdown' | 'review'>('countdown');
+  const [reviewPhoto, setReviewPhoto] = useState<CapturedPhoto | null>(null);
+  const [reviewCountdown, setReviewCountdown] = useState(3);
 
   const streamRef = useRef<MediaStream | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -93,6 +96,26 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
     }
   };
 
+  const playCountdownBeep = () => {
+    try {
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const audioCtx = new AudioContextClass();
+      const osc = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      osc.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1040, audioCtx.currentTime);
+      gainNode.gain.setValueAtTime(0.12, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.08);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.08);
+    } catch (e) {
+      console.warn('AudioContext not allowed or not supported', e);
+    }
+  };
+
   // Capture frame helper
   const captureFrame = () => {
     const video = videoRef.current;
@@ -130,34 +153,19 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
       },
     };
 
-    setCapturedBuffer((prev) => {
-      const updated = [...prev, newPhoto];
-      
-      if (updated.length === totalPhotos) {
-        // Stop stream immediately to release webcam
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
-          streamRef.current = null;
-        }
-        // Brief delay before finishing to let the last thumbnail animate
-        setTimeout(() => {
-          onCaptureComplete(updated);
-        }, 800);
-      } else {
-        // Move to the next index
-        setPhotoIndex((prevIdx) => prevIdx + 1);
-      }
-      
-      return updated;
-    });
+    setCapturedBuffer((prev) => [...prev, newPhoto]);
+    setReviewPhoto(newPhoto);
+    setReviewCountdown(3);
+    setPhase('review');
   };
 
   // Countdown timer logic
   useEffect(() => {
     if (permissionStatus !== 'granted') return;
     if (photoIndex >= totalPhotos) return;
+    if (phase !== 'countdown') return;
 
-    const initialDuration = photoIndex === 0 ? 5 : 3;
+    const initialDuration = 5;
     setCountdown(initialDuration);
 
     let timer: any;
@@ -174,6 +182,9 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
           setCountdown(0);
           captureFrame();
         } else {
+          if (currentVal <= 3) {
+            playCountdownBeep();
+          }
           setCountdown(currentVal);
         }
       }, 1000);
@@ -185,7 +196,37 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
       clearTimeout(warmUpTimeout);
       if (timer) clearInterval(timer);
     };
-  }, [permissionStatus, photoIndex]);
+  }, [permissionStatus, photoIndex, phase]);
+
+  const continueAfterReview = () => {
+    if (phase !== 'review') return;
+    if (capturedBuffer.length >= totalPhotos) {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      onCaptureComplete(capturedBuffer);
+      return;
+    }
+    setPhotoIndex((prevIdx) => prevIdx + 1);
+    setReviewPhoto(null);
+    setPhase('countdown');
+  };
+
+  useEffect(() => {
+    if (phase !== 'review') return;
+    setReviewCountdown(3);
+    let currentVal = 3;
+    const timer = setInterval(() => {
+      currentVal -= 1;
+      setReviewCountdown(currentVal);
+      if (currentVal <= 0) {
+        clearInterval(timer);
+        continueAfterReview();
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [phase, capturedBuffer]);
 
   // Render requesting permission state
   if (permissionStatus === 'pending') {
@@ -278,18 +319,45 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
           </div>
         </div>
 
-        {/* Visual Countdown Indicator Overlay */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/25 backdrop-blur-[0.5px] pointer-events-none">
-          <div className="font-sans text-[96px] md:text-[120px] leading-none font-bold tracking-tighter text-white/95 drop-shadow-[0_4px_16px_rgba(0,0,0,0.6)] animate-pulse">
-            {countdown}
+        {phase === 'countdown' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/25 backdrop-blur-[0.5px] pointer-events-none">
+            <div className="font-sans text-[96px] md:text-[120px] leading-none font-bold tracking-tighter text-white/95 drop-shadow-[0_4px_16px_rgba(0,0,0,0.6)] animate-pulse">
+              {countdown}
+            </div>
+
+            <div className="mt-8 bg-black/45 backdrop-blur-md px-6 py-2.5 rounded-full border border-white/15 shadow-sm">
+              <span className="font-sans text-xs font-semibold text-white uppercase tracking-widest">
+                Photo {photoIndex + 1} of {totalPhotos}
+              </span>
+            </div>
           </div>
-          
-          <div className="mt-8 bg-black/45 backdrop-blur-md px-6 py-2.5 rounded-full border border-white/15 shadow-sm">
-            <span className="font-sans text-xs font-semibold text-white uppercase tracking-widest">
-              Photo {photoIndex + 1} of {totalPhotos}
-            </span>
-          </div>
-        </div>
+        )}
+
+        {phase === 'review' && reviewPhoto && (
+          <button
+            type="button"
+            onClick={continueAfterReview}
+            aria-label={`Photo captured. Tap anywhere to continue. Continuing automatically in ${reviewCountdown} ${
+              reviewCountdown === 1 ? 'second' : 'seconds'
+            }.`}
+            className="absolute inset-0 z-30 bg-black/45 flex items-center justify-center p-4 sm:p-6 focus:outline-none focus-visible:ring-4 focus-visible:ring-inset focus-visible:ring-white/80"
+          >
+            <img
+              src={reviewPhoto.src}
+              alt="Captured review"
+              className="max-h-[76%] max-w-[86%] rounded-xl border border-white/25 shadow-2xl object-contain"
+            />
+            <div className="absolute bottom-8 md:bottom-10 left-1/2 -translate-x-1/2 flex w-[calc(100%-2rem)] max-w-lg items-center justify-center gap-3 bg-white/95 text-neutral-950 backdrop-blur-md px-6 py-3.5 md:px-8 md:py-4 rounded-full border border-white/70 shadow-[0_18px_45px_rgba(0,0,0,0.45)] font-sans text-sm md:text-base font-bold uppercase tracking-[0.08em] text-center leading-tight">
+              <span className="min-w-0">Tap anywhere to continue</span>
+              <span
+                aria-hidden="true"
+                className="flex h-8 w-8 md:h-9 md:w-9 shrink-0 items-center justify-center rounded-full bg-neutral-950 text-white text-sm md:text-base font-bold leading-none"
+              >
+                {reviewCountdown}
+              </span>
+            </div>
+          </button>
+        )}
 
         {/* Camera Flash Screen Overlay */}
         <div
@@ -299,7 +367,7 @@ export const CaptureStep: React.FC<CaptureStepProps> = ({
         ></div>
 
         {/* Thumbnail Preview Strip */}
-        {capturedBuffer.length > 0 && (
+        {capturedBuffer.length > 0 && phase === 'countdown' && (
           <div className="absolute bottom-6 left-0 right-0 flex justify-center gap-2.5 px-6 z-30 overflow-x-auto pointer-events-none select-none">
             {capturedBuffer.map((photo, index) => (
               <div

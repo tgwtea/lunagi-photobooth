@@ -41,21 +41,14 @@
 }
 
 /* Custom style rules for photos */
-.photo-bw {
-  filter: grayscale(100%);
-}
-.photo-soft {
-  filter: saturate(85%) brightness(102%) contrast(95%);
-}
-.photo-bright {
-  filter: brightness(110%) contrast(105%);
-}
-.photo-warm {
-  filter: sepia(15%) saturate(110%) brightness(102%);
-}
-.photo-cool {
-  filter: hue-rotate(10deg) saturate(95%) brightness(102%);
-}
+.photo-golden { filter: sepia(18%) saturate(118%) brightness(104%) contrast(101%); }
+.photo-arctic { filter: saturate(92%) brightness(105%) contrast(104%) hue-rotate(188deg); }
+.photo-bw-film { filter: grayscale(100%) contrast(116%) brightness(96%); }
+.photo-sepia { filter: sepia(52%) saturate(92%) brightness(98%) contrast(96%); }
+.photo-retro-film { filter: sepia(24%) saturate(82%) contrast(92%) brightness(103%); }
+.photo-dreamy { filter: saturate(108%) brightness(110%) contrast(88%); }
+.photo-matte { filter: saturate(88%) contrast(84%) brightness(101%); }
+.photo-pop { filter: saturate(145%) contrast(112%) brightness(103%); }
 
 /* @media print CSS rules for high-resolution layout printing */
 @media print {
@@ -113,4 +106,3 @@
     box-sizing: border-box !important;
   }
 }
-

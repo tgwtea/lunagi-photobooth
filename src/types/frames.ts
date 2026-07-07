@@ -20,9 +20,19 @@ export type LayoutTemplate = {
 export type FrameVisualPreset = {
   id: string;
   name: string;
+  group?: 'Classic' | 'Retro' | 'Pastel' | 'Statement';
   backgroundColor: string;
   borderColor?: string;
   textColor?: string;
+  pairedFilterId?: string;
+  brandingMode?: 'footer-full' | 'footer-url-only';
+  geometryVariant?: 'standard' | 'inset-film';
+  captionStyle?: {
+    fontFamily: string;
+    color: string;
+    letterSpacing: string;
+    textTransform?: 'uppercase' | 'none';
+  };
   overlayImageSrc?: string; // placeholder overlay metadata
-  themeId?: 'classic-film' | 'vintage-paper' | 'studio-neon' | 'standard';
+  themeId?: 'classic-film' | 'vintage-paper' | 'studio-neon' | 'checkerboard' | 'film-35mm' | 'standard';
 };

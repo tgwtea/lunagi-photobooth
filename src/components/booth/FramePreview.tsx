@@ -1,79 +1,109 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { CapturedPhoto, PhotoTransform, FooterCustomization } from '../../types/booth';
-import { LayoutTemplate, FrameVisualPreset } from '../../types/frames';
+import React, { useEffect, useMemo, useState } from 'react';
+import { CapturedPhoto, CustomizationState, PhotoTransform, PlacedSticker } from '../../types/booth';
+import { FRAME_VISUAL_PRESETS, LAYOUT_TEMPLATES } from '../../data/frameTemplates';
 import { FILTER_PRESETS } from '../../data/filterPresets';
+import { BRAND } from '../../data/branding';
+import { STICKER_ASSETS, STICKER_SIZE_FRACTIONS } from '../../data/stickers';
+import { deriveLayout, Rect } from '../../utils/layout';
+import { normalizePhotos } from '../../utils/canvasCompiler';
 
 type FramePreviewProps = {
   selectedPhotos: CapturedPhoto[];
-  layoutTemplate: LayoutTemplate;
-  visualPreset: FrameVisualPreset;
-  filterId: string;
-  photoTransforms?: Record<string, PhotoTransform>;
+  customization: CustomizationState;
   activePhotoId?: string;
   onSelectPhoto?: (photoId: string) => void;
   onChangeTransform?: (photoId: string, transform: PhotoTransform) => void;
-  footer?: FooterCustomization;
+  onChangeSticker?: (sticker: PlacedSticker) => void;
+  onDeleteSticker?: (stickerId: string) => void;
 };
 
-type DragState = {
-  startX: number;
-  startY: number;
-  initialOffsetX: number;
-  initialOffsetY: number;
-  slotWidth: number;
-  slotHeight: number;
+type DragState =
+  | {
+      type: 'photo';
+      id: string;
+      startX: number;
+      startY: number;
+      initialOffsetX: number;
+      initialOffsetY: number;
+      slotWidth: number;
+      slotHeight: number;
+    }
+  | {
+      type: 'sticker';
+      id: string;
+      startX: number;
+      startY: number;
+      initialCx: number;
+      initialCy: number;
+      frameWidth: number;
+      frameHeight: number;
+    };
+
+const getFontFamily = (font: string) => {
+  if (font === 'Playfair Display') return "'Playfair Display', Georgia, serif";
+  if (font === 'JetBrains Mono') return "'JetBrains Mono', monospace";
+  if (font === 'Great Vibes') return "'Great Vibes', cursive";
+  return "'Inter', sans-serif";
 };
+
+const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
 export const FramePreview: React.FC<FramePreviewProps> = ({
   selectedPhotos,
-  layoutTemplate,
-  visualPreset,
-  filterId,
-  photoTransforms = {},
+  customization,
   activePhotoId,
   onSelectPhoto,
   onChangeTransform,
-  footer,
+  onChangeSticker,
+  onDeleteSticker,
 }) => {
-  // Find active filter class
-  const activeFilter = FILTER_PRESETS.find((f) => f.id === filterId);
-  const filterClass = activeFilter ? activeFilter.className : '';
-
-  // Drag states
   const [dragState, setDragState] = useState<DragState | null>(null);
-  const [activeDragId, setActiveDragId] = useState<string | null>(null);
+  const [longPressTimer, setLongPressTimer] = useState<number | null>(null);
 
-  // Standardize photos to always have 4 elements (fallback placeholders)
-  const displayPhotos = useMemo(() => {
-    const list = [...selectedPhotos];
-    while (list.length < 4) {
-      list.push({
-        id: `placeholder-${list.length}`,
-        src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" fill="%23e9e8e7"></svg>',
-        capturedAt: Date.now(),
-        crop: { x: 0, y: 0, width: 600, height: 800, aspectRatio: '3:4' },
-      });
-    }
-    return list;
-  }, [selectedPhotos]);
+  const layoutTemplate =
+    LAYOUT_TEMPLATES.find((template) => template.id === customization.layout) || LAYOUT_TEMPLATES[0];
+  const visualPreset =
+    FRAME_VISUAL_PRESETS.find((preset) => preset.id === customization.frameId) || FRAME_VISUAL_PRESETS[0];
+  const activeFilter = FILTER_PRESETS.find((filter) => filter.id === customization.filterId);
+  const derived = useMemo(
+    () =>
+      deriveLayout(
+        layoutTemplate,
+        customization.frameOverrides,
+        visualPreset.geometryVariant || 'standard'
+      ),
+    [layoutTemplate, customization.frameOverrides, visualPreset.geometryVariant]
+  );
+  const displayPhotos = useMemo(() => normalizePhotos(selectedPhotos), [selectedPhotos]);
+  const isStrip = customization.layout === 'strip-4';
+  const frameWidth = isStrip ? 320 : 380;
+  const frameHeight = frameWidth * (derived.outputHeight / derived.outputWidth);
+  const scaleX = frameWidth / derived.outputWidth;
+  const scaleY = frameHeight / derived.outputHeight;
+  const filterClass = activeFilter?.className || '';
+  const captionText = customization.caption.text.trim().slice(0, 24);
+  const captionStyle = visualPreset.captionStyle;
 
-  // Handle Drag Start
-  const handleDragStart = (
+  const scaledRect = (rect: Rect) => ({
+    left: rect.x * scaleX,
+    top: rect.y * scaleY,
+    width: rect.width * scaleX,
+    height: rect.height * scaleY,
+  });
+
+  const handlePhotoDragStart = (
     e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
     photoId: string
   ) => {
-    if (!onChangeTransform) return;
-    
-    // Select this photo as active for edit panel
+    if (!onChangeTransform || photoId.startsWith('placeholder-')) return;
     onSelectPhoto?.(photoId);
-
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    
     const rect = e.currentTarget.getBoundingClientRect();
-    const transform = photoTransforms[photoId] || { zoom: 1, offsetX: 0, offsetY: 0 };
-
+    const transform = customization.photoTransforms[photoId] || { zoom: 1, offsetX: 0, offsetY: 0 };
     setDragState({
+      type: 'photo',
+      id: photoId,
       startX: clientX,
       startY: clientY,
       initialOffsetX: transform.offsetX,
@@ -81,48 +111,72 @@ export const FramePreview: React.FC<FramePreviewProps> = ({
       slotWidth: rect.width || 1,
       slotHeight: rect.height || 1,
     });
-    setActiveDragId(photoId);
-
-    if (e.cancelable) {
-      e.preventDefault();
-    }
+    if (e.cancelable) e.preventDefault();
   };
 
-  // Window listeners for dragging
+  const handleStickerDragStart = (
+    e: React.MouseEvent<HTMLDivElement> | React.TouchEvent<HTMLDivElement>,
+    sticker: PlacedSticker
+  ) => {
+    if (!onChangeSticker) return;
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
+    setDragState({
+      type: 'sticker',
+      id: sticker.id,
+      startX: clientX,
+      startY: clientY,
+      initialCx: sticker.cx,
+      initialCy: sticker.cy,
+      frameWidth,
+      frameHeight,
+    });
+    const timer = window.setTimeout(() => onDeleteSticker?.(sticker.id), 650);
+    setLongPressTimer(timer);
+    if (e.cancelable) e.preventDefault();
+  };
+
   useEffect(() => {
-    if (!activeDragId || !dragState || !onChangeTransform) return;
+    if (!dragState) return;
 
     const handleMove = (clientX: number, clientY: number) => {
-      const dx = clientX - dragState.startX;
-      const dy = clientY - dragState.startY;
-      
-      const relDx = dx / dragState.slotWidth;
-      const relDy = dy / dragState.slotHeight;
+      if (longPressTimer) {
+        window.clearTimeout(longPressTimer);
+        setLongPressTimer(null);
+      }
 
-      const transform = photoTransforms[activeDragId] || { zoom: 1, offsetX: 0, offsetY: 0 };
-      
-      // Limit panning relative to zoom level to keep image visible
-      const maxOffset = 1.0; 
-      onChangeTransform(activeDragId, {
-        ...transform,
-        offsetX: Math.max(-maxOffset, Math.min(maxOffset, dragState.initialOffsetX + relDx)),
-        offsetY: Math.max(-maxOffset, Math.min(maxOffset, dragState.initialOffsetY + relDy)),
-      });
-    };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      handleMove(e.clientX, e.clientY);
-    };
-
-    const handleTouchMove = (e: TouchEvent) => {
-      if (e.touches.length > 0) {
-        handleMove(e.touches[0].clientX, e.touches[0].clientY);
+      if (dragState.type === 'photo') {
+        if (!onChangeTransform) return;
+        const dx = clientX - dragState.startX;
+        const dy = clientY - dragState.startY;
+        const transform = customization.photoTransforms[dragState.id] || { zoom: 1, offsetX: 0, offsetY: 0 };
+        onChangeTransform(dragState.id, {
+          ...transform,
+          offsetX: clamp(dragState.initialOffsetX + dx / dragState.slotWidth, -1, 1),
+          offsetY: clamp(dragState.initialOffsetY + dy / dragState.slotHeight, -1, 1),
+        });
+      } else {
+        if (!onChangeSticker) return;
+        const sticker = customization.placedStickers.find((item) => item.id === dragState.id);
+        if (!sticker) return;
+        onChangeSticker({
+          ...sticker,
+          cx: clamp(dragState.initialCx + (clientX - dragState.startX) / dragState.frameWidth, 0, 1),
+          cy: clamp(dragState.initialCy + (clientY - dragState.startY) / dragState.frameHeight, 0, 1),
+        });
       }
     };
 
+    const handleMouseMove = (e: MouseEvent) => handleMove(e.clientX, e.clientY);
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    };
     const handleDragEnd = () => {
+      if (longPressTimer) {
+        window.clearTimeout(longPressTimer);
+        setLongPressTimer(null);
+      }
       setDragState(null);
-      setActiveDragId(null);
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -136,265 +190,165 @@ export const FramePreview: React.FC<FramePreviewProps> = ({
       window.removeEventListener('touchmove', handleTouchMove);
       window.removeEventListener('touchend', handleDragEnd);
     };
-  }, [activeDragId, dragState, photoTransforms, onChangeTransform]);
+  }, [dragState, longPressTimer, onChangeSticker, onChangeTransform, customization.photoTransforms, customization.placedStickers]);
 
-  // Determine border styles
-  const borderStyles = visualPreset.borderColor
-    ? { borderColor: visualPreset.borderColor, borderStyle: 'solid', borderWidth: '1px' }
-    : {};
-
-  // Formatted Date Stamp
-  const dateStamp = useMemo(() => {
-    if (!footer?.showDate) return '';
-    const dateObj = selectedPhotos[0]?.capturedAt
-      ? new Date(selectedPhotos[0].capturedAt)
-      : new Date();
-    const yyyy = dateObj.getFullYear();
-    const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
-    const dd = String(dateObj.getDate()).padStart(2, '0');
-    return `${yyyy}.${mm}.${dd}`;
-  }, [footer?.showDate, selectedPhotos]);
-
-  // Footer Style Helpers
-  const footerFontFamily = useMemo(() => {
-    switch (footer?.fontFamily) {
-      case 'Playfair Display':
-        return "'Playfair Display', Georgia, serif";
-      case 'JetBrains Mono':
-        return "'JetBrains Mono', monospace";
-      case 'Great Vibes':
-        return "'Great Vibes', cursive";
-      default:
-        return "'Inter', sans-serif";
-    }
-  }, [footer?.fontFamily]);
-
-  const footerColor = footer?.color || visualPreset.textColor || '#1A1A1A';
-
-  const footerAlignClass = useMemo(() => {
-    switch (footer?.alignment) {
-      case 'left':
-        return 'text-left px-4';
-      case 'right':
-        return 'text-right px-4';
-      default:
-        return 'text-center';
-    }
-  }, [footer?.alignment]);
-
-  // Sprockets count
-  const isStrip = layoutTemplate.id === 'strip-4';
-
-  const renderSprocketHoles = (count: number) => {
+  const renderSprockets = (dense: boolean) => {
+    const count = dense ? (isStrip ? 42 : 28) : (isStrip ? 30 : 18);
+    const left = dense ? '15%' : '2%';
+    const right = dense ? '90%' : '96%';
     return (
-      <div className="flex flex-col justify-between h-full py-2">
-        {Array.from({ length: count }).map((_, i) => (
-          <div
-            key={i}
-            className="w-1.5 h-3 sm:w-2 sm:h-3.5 bg-black border border-white/5 rounded-[1px] opacity-75"
-          />
+      <>
+        {[left, right].map((x) => (
+          <div key={x} className="absolute top-0 bottom-0 flex flex-col justify-around" style={{ left: x }}>
+            {Array.from({ length: count }).map((_, index) => (
+              <div
+                key={index}
+                className={`${dense ? 'w-2 h-2.5 bg-[#f0efe8]' : 'w-2 h-3.5 bg-black'} rounded-[2px] opacity-90`}
+              />
+            ))}
+          </div>
         ))}
-      </div>
+      </>
     );
   };
 
-  // Render Theme Overlays
-  const renderThemeOverlay = () => {
-    if (visualPreset.themeId === 'vintage-paper') {
-      return (
-        <>
-          {/* Paper grain SVG overlay */}
-          <div
-            className="absolute inset-0 pointer-events-none mix-blend-multiply opacity-50 rounded-sm"
-            style={{
-              backgroundImage: `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='3' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.1 0'/></filter><rect width='120' height='120' filter='url(%23n)'/></svg>")`
-            }}
-          />
-          {/* Subtle warm retro vignette shadow */}
-          <div className="absolute inset-0 pointer-events-none rounded-sm bg-[radial-gradient(circle,transparent_55%,rgba(92,74,60,0.1)_100%)]" />
-        </>
-      );
-    }
-    return null;
-  };
+  const renderCaption = () => {
+    if (!captionText) return null;
+    const style = {
+      color: captionStyle?.color || visualPreset.textColor || '#1A1A1A',
+      fontFamily: captionStyle?.fontFamily || getFontFamily(customization.caption.fontFamily),
+      letterSpacing:
+        captionStyle?.letterSpacing ||
+        (customization.caption.fontFamily === 'Great Vibes' ? '0.02em' : '0.12em'),
+      textTransform: captionStyle?.textTransform || 'uppercase',
+    } as React.CSSProperties;
 
-  const renderPhotos = () => {
-    return displayPhotos.map((photo, index) => {
-      const transform = photoTransforms[photo.id] || { zoom: 1, offsetX: 0, offsetY: 0 };
-      const isActive = activePhotoId === photo.id;
-      const isPlaceholder = photo.id.startsWith('placeholder-');
-
-      // Glow style for neon theme
-      const slotBorderThemeClass =
-        visualPreset.themeId === 'studio-neon'
-          ? 'border-2 border-[#FF007F] shadow-[0_0_10px_rgba(255,0,127,0.4)]'
-          : 'border border-black/5';
-
+    return derived.gapRects.map((gap, index) => {
+      if (gap.height <= 0) return null;
+      const rect = scaledRect(gap);
       return (
         <div
-          key={photo.id + '-' + index}
-          onMouseDown={(e) => !isPlaceholder && handleDragStart(e, photo.id)}
-          onTouchStart={(e) => !isPlaceholder && handleDragStart(e, photo.id)}
-          className={`w-full aspect-[4/3] bg-neutral-100 rounded-[2px] overflow-hidden relative select-none cursor-move transition-shadow duration-200 group ${slotBorderThemeClass} ${
-            isActive ? 'ring-2 ring-offset-2 ring-primary' : 'hover:ring-1 hover:ring-primary/50'
-          }`}
+          key={index}
+          className="absolute flex items-center justify-center text-[9px] sm:text-[10px] font-bold pointer-events-none text-center"
+          style={{ ...rect, ...style }}
         >
-          <img
-            src={photo.src}
-            alt={`Photo ${index + 1}`}
-            className={`w-full h-full object-cover select-none pointer-events-none ${filterClass}`}
-            style={{
-              transform: `translate(${transform.offsetX * 100}%, ${transform.offsetY * 100}%) scale(${transform.zoom})`,
-              transformOrigin: 'center center',
-              transition: activeDragId === photo.id ? 'none' : 'transform 0.15s ease-out',
-            }}
-          />
-
-          {/* Hover overlay hint */}
-          {!isPlaceholder && (
-            <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
-              <div className="bg-black/60 rounded-full p-1.5 text-white flex items-center gap-1.5 shadow-md">
-                <span className="material-symbols-outlined text-sm">open_with</span>
-                <span className="text-[9px] font-sans font-semibold tracking-wider uppercase pr-1">Drag to Pan</span>
-              </div>
-            </div>
-          )}
-
-          {/* Slot marker */}
-          <div className="absolute top-1.5 left-1.5 bg-black/60 text-white rounded-full w-4 h-4 flex items-center justify-center text-[9px] font-sans font-semibold pointer-events-none">
-            {index + 1}
-          </div>
+          {captionText}
         </div>
       );
     });
   };
 
-  const renderSignature = () => {
+  const renderBranding = () => {
+    const urlOnly = visualPreset.brandingMode === 'footer-url-only';
     return (
-      <div className={`pt-4 pb-2 ${footerAlignClass} select-none`}>
-        <div
-          className="font-sans font-semibold text-[10px] sm:text-xs uppercase tracking-[0.25em]"
-          style={{
-            fontFamily: footerFontFamily,
-            color: footerColor,
-            textTransform: footer?.fontFamily === 'Great Vibes' ? 'none' : 'uppercase',
-            letterSpacing: footer?.fontFamily === 'Great Vibes' ? '0.05em' : '0.25em',
-            fontSize: footer?.fontFamily === 'Great Vibes' ? '18px' : undefined,
-          }}
-        >
-          {footer?.text || 'LUNAGI STUDIOS'}
-        </div>
-        {dateStamp && (
-          <div
-            className="text-[8px] sm:text-[9px] tracking-widest mt-1 opacity-70"
-            style={{
-              fontFamily: footer?.fontFamily === 'JetBrains Mono' ? "'JetBrains Mono', monospace" : "'Inter', sans-serif",
-              color: footerColor,
-            }}
-          >
-            {dateStamp}
+      <div
+        className="absolute left-0 right-0 bottom-0 flex flex-col items-center justify-center text-center pointer-events-none"
+        style={{ height: frameHeight * 0.07, color: visualPreset.textColor || '#111111' }}
+      >
+        {!urlOnly && (
+          <div className="font-sans text-[10px] font-bold tracking-[0.25em] uppercase">
+            {BRAND.wordmark}
           </div>
         )}
+        <div className="font-sans text-[8px] font-semibold tracking-[0.14em] opacity-75">
+          {BRAND.url}
+        </div>
       </div>
     );
   };
 
-  // Base style configuration for different themes
-  const containerThemeStyles = useMemo(() => {
-    const styles: React.CSSProperties = {
-      backgroundColor: visualPreset.backgroundColor,
-      color: visualPreset.textColor,
-      ...borderStyles,
-    };
-
-    if (visualPreset.themeId === 'studio-neon') {
-      styles.borderColor = '#00F0FF';
-      styles.borderWidth = '2px';
-      styles.borderStyle = 'solid';
-      styles.boxShadow = '0 0 20px rgba(0, 240, 255, 0.4), inset 0 0 10px rgba(255, 0, 127, 0.2)';
-    }
-
-    return styles;
-  }, [visualPreset, borderStyles]);
-
-  if (isStrip) {
-    return (
-      <div
-        className="w-[280px] sm:w-[320px] aspect-[1/3] p-4 flex flex-col justify-between shadow-[0_20px_40px_rgba(0,0,0,0.06)] border border-[#E5E5E5]/20 rounded-sm relative overflow-hidden select-none"
-        style={containerThemeStyles}
-      >
-        {/* Sprockets Overlay for Film */}
-        {visualPreset.themeId === 'classic-film' && (
-          <>
-            <div className="absolute top-0 bottom-0 left-1 w-2.5">
-              {renderSprocketHoles(15)}
-            </div>
-            <div className="absolute top-0 bottom-0 right-1 w-2.5">
-              {renderSprocketHoles(15)}
-            </div>
-          </>
-        )}
-
-        {/* Photos Stack */}
-        <div className={`flex flex-col gap-2.5 ${visualPreset.themeId === 'classic-film' ? 'px-3.5' : ''}`}>
-          {renderPhotos()}
-        </div>
-
-        {/* Branding Footer */}
-        {renderSignature()}
-
-        {/* Themed Overlay */}
-        {renderThemeOverlay()}
-
-        {/* Dynamic transparent overlay image drawn on top of everything */}
-        {visualPreset.overlayImageSrc && (
-          <img
-            src={visualPreset.overlayImageSrc}
-            alt="Frame Overlay"
-            className="absolute inset-0 w-full h-full object-fill pointer-events-none z-20"
-          />
-        )}
-      </div>
-    );
-  }
-
-  // 2x2 Square Grid
   return (
     <div
-      className="w-[300px] sm:w-[360px] aspect-square p-5 flex flex-col justify-between shadow-[0_20px_40px_rgba(0,0,0,0.06)] border border-[#E5E5E5]/20 rounded-sm relative overflow-hidden select-none"
-      style={containerThemeStyles}
+      className="relative overflow-hidden rounded-sm shadow-[0_20px_40px_rgba(0,0,0,0.08)] border border-black/10 select-none"
+      style={{
+        width: frameWidth,
+        height: frameHeight,
+        backgroundColor: customization.frameOverrides.backgroundColor || visualPreset.backgroundColor,
+        borderColor: visualPreset.borderColor,
+        boxShadow:
+          visualPreset.themeId === 'studio-neon'
+            ? '0 0 24px rgba(0, 240, 255, 0.35), inset 0 0 14px rgba(255, 0, 127, 0.22)'
+            : undefined,
+      }}
     >
-      {/* Sprockets Overlay for Film */}
-      {visualPreset.themeId === 'classic-film' && (
+      {visualPreset.themeId === 'checkerboard' && (
+        <div
+          className="absolute inset-0 opacity-70 pointer-events-none"
+          style={{
+            backgroundImage:
+              'linear-gradient(45deg, rgba(0,0,0,0.08) 25%, transparent 25%), linear-gradient(-45deg, rgba(0,0,0,0.08) 25%, transparent 25%), linear-gradient(45deg, transparent 75%, rgba(0,0,0,0.08) 75%), linear-gradient(-45deg, transparent 75%, rgba(0,0,0,0.08) 75%)',
+            backgroundSize: '32px 32px',
+            backgroundPosition: '0 0, 0 16px, 16px -16px, -16px 0px',
+          }}
+        />
+      )}
+
+      {visualPreset.themeId === 'classic-film' && renderSprockets(false)}
+      {visualPreset.themeId === 'film-35mm' && (
         <>
-          <div className="absolute top-0 bottom-0 left-1 w-2.5">
-            {renderSprocketHoles(10)}
-          </div>
-          <div className="absolute top-0 bottom-0 right-1 w-2.5">
-            {renderSprocketHoles(10)}
+          {renderSprockets(true)}
+          <div className="absolute left-2 top-1/2 -translate-y-1/2 -rotate-90 origin-center text-[10px] font-bold tracking-[0.18em] text-[#f3f0e7] whitespace-nowrap pointer-events-none">
+            {BRAND.wordmark}
           </div>
         </>
       )}
 
-      {/* 2x2 Grid container */}
-      <div className={`grid grid-cols-2 gap-3 ${visualPreset.themeId === 'classic-film' ? 'px-3.5' : ''}`}>
-        {renderPhotos()}
-      </div>
+      {derived.photoSlots.map((slot, index) => {
+        const photo = displayPhotos[index];
+        const transform = customization.photoTransforms[photo.id] || { zoom: 1, offsetX: 0, offsetY: 0 };
+        const rect = scaledRect(slot);
+        const radius = derived.slotRadius * scaleX;
+        const isActive = activePhotoId === photo.id;
+        return (
+          <div
+            key={`${photo.id}-${slot.id}`}
+            className={`absolute overflow-hidden bg-neutral-100 cursor-move border ${
+              visualPreset.themeId === 'studio-neon'
+                ? 'border-[#FF007F] shadow-[0_0_10px_rgba(255,0,127,0.5)]'
+                : 'border-black/10'
+            } ${isActive ? 'ring-2 ring-primary ring-offset-2' : ''}`}
+            style={{ ...rect, borderRadius: radius }}
+            onMouseDown={(e) => handlePhotoDragStart(e, photo.id)}
+            onTouchStart={(e) => handlePhotoDragStart(e, photo.id)}
+          >
+            <img
+              src={photo.src}
+              alt={`Photo ${index + 1}`}
+              className={`w-full h-full object-cover pointer-events-none select-none ${filterClass}`}
+              style={{
+                transform: `translate(${transform.offsetX * 100}%, ${transform.offsetY * 100}%) scale(${transform.zoom})`,
+                transformOrigin: 'center center',
+              }}
+            />
+          </div>
+        );
+      })}
 
-      {/* Branding Footer */}
-      {renderSignature()}
+      {renderCaption()}
 
-      {/* Themed Overlay */}
-      {renderThemeOverlay()}
+      {customization.placedStickers.map((sticker) => {
+        const asset = STICKER_ASSETS.find((item) => item.id === sticker.assetId);
+        if (!asset) return null;
+        const width = STICKER_SIZE_FRACTIONS[sticker.size] * frameWidth;
+        return (
+          <div
+            key={sticker.id}
+            className="absolute z-20 cursor-grab active:cursor-grabbing"
+            style={{
+              left: sticker.cx * frameWidth - width / 2,
+              top: sticker.cy * frameHeight - width / 2,
+              width,
+            }}
+            onMouseDown={(e) => handleStickerDragStart(e, sticker)}
+            onTouchStart={(e) => handleStickerDragStart(e, sticker)}
+            title="Drag sticker. Hold to delete."
+          >
+            <img src={asset.src} alt={asset.name} className="w-full h-auto pointer-events-none select-none" />
+          </div>
+        );
+      })}
 
-      {/* Dynamic transparent overlay image drawn on top of everything */}
-      {visualPreset.overlayImageSrc && (
-        <img
-          src={visualPreset.overlayImageSrc}
-          alt="Frame Overlay"
-          className="absolute inset-0 w-full h-full object-fill pointer-events-none z-20"
-        />
-      )}
+      {renderBranding()}
     </div>
   );
 };

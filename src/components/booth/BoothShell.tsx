@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { BoothStep, CapturedPhoto, PhotoTransform, FooterCustomization } from '../../types/booth';
-import { FrameLayout } from '../../types/frames';
+import { BoothStep, CapturedPhoto, CustomizationState } from '../../types/booth';
 import { PreviewStep } from './PreviewStep';
 import { CaptureStep } from './CaptureStep';
 import { SelectStep } from './SelectStep';
@@ -25,18 +24,24 @@ export const BoothShell: React.FC<BoothShellProps> = ({ onExitBooth }) => {
   const [capturedPhotos, setCapturedPhotos] = useState<CapturedPhoto[]>([]);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<string[]>([]);
   
-  // Customization styling state
-  const [layout, setLayout] = useState<FrameLayout>('strip-4');
-  const [frameId, setFrameId] = useState<string>('white');
-  const [filterId, setFilterId] = useState<string>('original');
-  const [photoTransforms, setPhotoTransforms] = useState<Record<string, PhotoTransform>>({});
-  const [footer, setFooter] = useState<FooterCustomization>({
-    text: 'LUNAGI STUDIOS',
-    fontFamily: 'Inter',
-    color: '',
-    alignment: 'center',
-    showDate: false,
+  const defaultCustomization = (): CustomizationState => ({
+    layout: 'strip-4',
+    frameId: 'white',
+    filterId: 'original',
+    effectId: null,
+    photoTransforms: {},
+    caption: {
+      text: '',
+      fontFamily: 'Inter',
+    },
+    frameOverrides: {
+      cornerShape: 'rounded',
+      innerGapPx: 40,
+      borderPx: 6,
+    },
+    placedStickers: [],
   });
+  const [customization, setCustomization] = useState<CustomizationState>(defaultCustomization);
 
   // Capture callback
   const handleCaptureComplete = (photos: CapturedPhoto[]) => {
@@ -57,17 +62,7 @@ export const BoothShell: React.FC<BoothShellProps> = ({ onExitBooth }) => {
   const resetSession = () => {
     setCapturedPhotos([]);
     setSelectedPhotoIds([]);
-    setLayout('strip-4');
-    setFrameId('white');
-    setFilterId('original');
-    setPhotoTransforms({});
-    setFooter({
-      text: 'LUNAGI STUDIOS',
-      fontFamily: 'Inter',
-      color: '',
-      alignment: 'center',
-      showDate: false,
-    });
+    setCustomization(defaultCustomization());
     setStep('preview');
   };
 
@@ -180,18 +175,14 @@ export const BoothShell: React.FC<BoothShellProps> = ({ onExitBooth }) => {
         return (
           <EditorStep
             selectedPhotos={orderedSelectedPhotos}
-            layout={layout}
-            frameId={frameId}
-            filterId={filterId}
-            photoTransforms={photoTransforms}
-            footer={footer}
-            onChangeLayout={setLayout}
-            onChangeFrame={setFrameId}
-            onChangeFilter={setFilterId}
+            customization={customization}
+            onChangeCustomization={setCustomization}
             onChangeTransform={(photoId, transform) => {
-              setPhotoTransforms((prev) => ({ ...prev, [photoId]: transform }));
+              setCustomization((prev) => ({
+                ...prev,
+                photoTransforms: { ...prev.photoTransforms, [photoId]: transform },
+              }));
             }}
-            onChangeFooter={setFooter}
             onDone={() => setStep('result')}
           />
         );
@@ -203,11 +194,7 @@ export const BoothShell: React.FC<BoothShellProps> = ({ onExitBooth }) => {
         return (
           <ResultStep
             selectedPhotos={finalSelectedPhotos}
-            layout={layout}
-            frameId={frameId}
-            filterId={filterId}
-            photoTransforms={photoTransforms}
-            footer={footer}
+            customization={customization}
             onRestart={resetSession}
           />
         );

@@ -1,22 +1,26 @@
-import { CapturedPhoto, PhotoTransform, FooterCustomization } from '../types/booth';
-import { FrameLayout } from '../types/frames';
+import {
+  CapturedPhoto,
+  CustomizationState,
+  EffectId,
+  FrameOverrides,
+  PhotoTransform,
+  PlacedSticker,
+} from '../types/booth';
+import { FrameLayout, FrameVisualPreset, LayoutTemplate, PhotoSlot } from '../types/frames';
 import { LAYOUT_TEMPLATES, FRAME_VISUAL_PRESETS } from '../data/frameTemplates';
+import { FILTER_PRESETS, FilterPreset } from '../data/filterPresets';
+import { BRAND } from '../data/branding';
+import { STICKER_ASSETS, STICKER_SIZE_FRACTIONS } from '../data/stickers';
+import { deriveLayout, DerivedLayout, Rect } from './layout';
+
+export const DEFAULT_FRAME_OVERRIDES: FrameOverrides = {
+  cornerShape: 'rounded',
+  innerGapPx: 40,
+  borderPx: 6,
+};
 
 export const getCanvasFilter = (filterId: string): string => {
-  switch (filterId) {
-    case 'bw':
-      return 'grayscale(100%)';
-    case 'soft':
-      return 'saturate(85%) brightness(102%) contrast(95%)';
-    case 'bright':
-      return 'brightness(110%) contrast(105%)';
-    case 'warm':
-      return 'sepia(15%) saturate(110%) brightness(102%)';
-    case 'cool':
-      return 'hue-rotate(10deg) saturate(95%) brightness(102%)';
-    default:
-      return 'none';
-  }
+  return FILTER_PRESETS.find((filter) => filter.id === filterId)?.cssFilter || 'none';
 };
 
 export const loadImage = (src: string): Promise<HTMLImageElement> => {
@@ -37,7 +41,30 @@ export const loadImage = (src: string): Promise<HTMLImageElement> => {
   });
 };
 
-// Generates an in-memory noise canvas for vintage paper texture overlay
+const getLayout = (layoutId: FrameLayout): LayoutTemplate =>
+  LAYOUT_TEMPLATES.find((template) => template.id === layoutId) || LAYOUT_TEMPLATES[0];
+
+const getPreset = (frameId: string): FrameVisualPreset =>
+  FRAME_VISUAL_PRESETS.find((preset) => preset.id === frameId) || FRAME_VISUAL_PRESETS[0];
+
+const getFilter = (filterId: string): FilterPreset =>
+  FILTER_PRESETS.find((filter) => filter.id === filterId) || FILTER_PRESETS[0];
+
+const placeholderPhoto = (index: number): CapturedPhoto => ({
+  id: `placeholder-${index}`,
+  src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" fill="%23e9e8e7"></svg>',
+  capturedAt: Date.now(),
+  crop: { x: 0, y: 0, width: 600, height: 800, aspectRatio: '3:4' },
+});
+
+export const normalizePhotos = (selectedPhotos: CapturedPhoto[]): CapturedPhoto[] => {
+  const displayPhotos = [...selectedPhotos];
+  while (displayPhotos.length < 4) {
+    displayPhotos.push(placeholderPhoto(displayPhotos.length));
+  }
+  return displayPhotos.slice(0, 4);
+};
+
 const createNoiseCanvas = (width: number, height: number, opacity: number): HTMLCanvasElement => {
   const noiseCanvas = document.createElement('canvas');
   noiseCanvas.width = width;
@@ -47,18 +74,73 @@ const createNoiseCanvas = (width: number, height: number, opacity: number): HTML
     const imgData = noiseCtx.createImageData(width, height);
     const data = imgData.data;
     for (let i = 0; i < data.length; i += 4) {
-      const val = 120 + Math.floor(Math.random() * 110); // soft warm paper grain spectrum
-      data[i] = val; // R
-      data[i + 1] = val - 5; // G (slightly warmer)
-      data[i + 2] = val - 15; // B (yellowish paper tone)
-      data[i + 3] = Math.floor(Math.random() * 255 * opacity); // Opacity noise
+      const val = 90 + Math.floor(Math.random() * 150);
+      data[i] = val;
+      data[i + 1] = val;
+      data[i + 2] = val;
+      data[i + 3] = Math.floor(Math.random() * 255 * opacity);
     }
     noiseCtx.putImageData(imgData, 0, 0);
   }
   return noiseCanvas;
 };
 
-// Drawing helper supporting Object-Cover sizing, zoom and translation (panning) offsets
+const supportsCanvasFilter = (ctx: CanvasRenderingContext2D) => 'filter' in ctx;
+
+const applyMonoFallback = (ctx: CanvasRenderingContext2D, rect: Rect) => {
+  const imageData = ctx.getImageData(rect.x, rect.y, rect.width, rect.height);
+  const data = imageData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const grey = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    data[i] = grey;
+    data[i + 1] = grey;
+    data[i + 2] = grey;
+  }
+  ctx.putImageData(imageData, rect.x, rect.y);
+};
+
+const applyFilterOverlays = (ctx: CanvasRenderingContext2D, rect: Rect, filter: FilterPreset) => {
+  if (filter.grain) {
+    const noiseCanvas = createNoiseCanvas(128, 128, filter.grain);
+    const pattern = ctx.createPattern(noiseCanvas, 'repeat');
+    if (pattern) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'overlay';
+      ctx.fillStyle = pattern;
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+      ctx.restore();
+    }
+    noiseCanvas.width = 0;
+    noiseCanvas.height = 0;
+  }
+
+  if (filter.vignette) {
+    ctx.save();
+    const gradient = ctx.createRadialGradient(
+      rect.x + rect.width / 2,
+      rect.y + rect.height / 2,
+      Math.min(rect.width, rect.height) * 0.24,
+      rect.x + rect.width / 2,
+      rect.y + rect.height / 2,
+      Math.max(rect.width, rect.height) * 0.72
+    );
+    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+    gradient.addColorStop(1, `rgba(0,0,0,${filter.vignette})`);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    ctx.restore();
+  }
+
+  if (filter.bloom) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = filter.bloom;
+    ctx.filter = 'blur(14px) brightness(118%)';
+    ctx.drawImage(ctx.canvas, rect.x, rect.y, rect.width, rect.height, rect.x, rect.y, rect.width, rect.height);
+    ctx.restore();
+  }
+};
+
 export const drawImageCoverWithTransform = (
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement,
@@ -77,17 +159,14 @@ export const drawImageCoverWithTransform = (
   let drawY = y;
 
   if (imgRatio > slotRatio) {
-    // Image is wider than slot: height matches slot, width is larger
     drawW = h * imgRatio;
     drawX = x - (drawW - w) / 2;
   } else {
-    // Image is taller than slot: width matches slot, height is larger
     drawH = w / imgRatio;
     drawY = y - (drawH - h) / 2;
   }
 
   ctx.save();
-  // 1. Clip to slot rounded rectangle boundary
   if (radius && radius > 0) {
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, radius);
@@ -95,30 +174,359 @@ export const drawImageCoverWithTransform = (
     ctx.clip();
   }
 
-  // 2. Translate and scale centered on the slot
   const centerX = x + w / 2;
   const centerY = y + h / 2;
-
   ctx.translate(centerX, centerY);
-  // Panning translations are relative to the slot dimensions
   ctx.translate(transform.offsetX * w, transform.offsetY * h);
   ctx.scale(transform.zoom, transform.zoom);
   ctx.translate(-centerX, -centerY);
-
-  // 3. Draw the image
   ctx.drawImage(img, drawX, drawY, drawW, drawH);
   ctx.restore();
 };
 
-export const compileFrameCanvas = async (
-  layoutId: FrameLayout,
-  selectedPhotos: CapturedPhoto[],
-  frameId: string,
+const drawMirror = (
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  rect: Rect,
+  transform: PhotoTransform,
+  radius?: number
+) => {
+  const halfWidth = rect.width / 2;
+  drawImageCoverWithTransform(ctx, img, rect.x, rect.y, halfWidth, rect.height, transform, radius);
+  ctx.save();
+  ctx.beginPath();
+  if (radius && radius > 0) {
+    ctx.roundRect(rect.x + halfWidth, rect.y, halfWidth, rect.height, radius);
+  } else {
+    ctx.rect(rect.x + halfWidth, rect.y, halfWidth, rect.height);
+  }
+  ctx.clip();
+  ctx.translate(rect.x + rect.width, 0);
+  ctx.scale(-1, 1);
+  drawImageCoverWithTransform(ctx, img, rect.x, rect.y, halfWidth, rect.height, transform, radius);
+  ctx.restore();
+};
+
+const applyEffect = (ctx: CanvasRenderingContext2D, rect: Rect, effectId: EffectId | null) => {
+  if (!effectId) return;
+
+  if (effectId === 'pixelate') {
+    const pixelCanvas = document.createElement('canvas');
+    pixelCanvas.width = Math.max(1, Math.floor(rect.width / 18));
+    pixelCanvas.height = Math.max(1, Math.floor(rect.height / 18));
+    const pixelCtx = pixelCanvas.getContext('2d');
+    if (pixelCtx) {
+      pixelCtx.drawImage(ctx.canvas, rect.x, rect.y, rect.width, rect.height, 0, 0, pixelCanvas.width, pixelCanvas.height);
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(pixelCanvas, 0, 0, pixelCanvas.width, pixelCanvas.height, rect.x, rect.y, rect.width, rect.height);
+      ctx.restore();
+    }
+    return;
+  }
+
+  if (effectId === 'vhs') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = 0.18;
+    ctx.drawImage(ctx.canvas, rect.x, rect.y, rect.width, rect.height, rect.x - 5, rect.y, rect.width, rect.height);
+    ctx.globalAlpha = 0.14;
+    ctx.drawImage(ctx.canvas, rect.x, rect.y, rect.width, rect.height, rect.x + 5, rect.y, rect.width, rect.height);
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    for (let y = rect.y; y < rect.y + rect.height; y += 8) {
+      ctx.fillRect(rect.x, y, rect.width, 2);
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (effectId === 'thermal') {
+    const imageData = ctx.getImageData(rect.x, rect.y, rect.width, rect.height);
+    const data = imageData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const v = (data[i] + data[i + 1] + data[i + 2]) / 3 / 255;
+      data[i] = Math.min(255, 60 + v * 270);
+      data[i + 1] = Math.max(0, 40 + Math.sin(v * Math.PI) * 210);
+      data[i + 2] = Math.max(0, 220 - v * 260);
+    }
+    ctx.putImageData(imageData, rect.x, rect.y);
+  }
+};
+
+export const drawPhotoWithLook = (
+  ctx: CanvasRenderingContext2D,
+  img: HTMLImageElement,
+  rect: Rect,
+  transform: PhotoTransform,
   filterId: string,
-  photoTransforms: Record<string, PhotoTransform> = {},
-  footer?: FooterCustomization
+  effectId: EffectId | null,
+  radius?: number
+) => {
+  const filter = getFilter(filterId);
+  ctx.save();
+  if (effectId === 'mirror') {
+    if (supportsCanvasFilter(ctx)) ctx.filter = filter.cssFilter;
+    drawMirror(ctx, img, rect, transform, radius);
+  } else {
+    if (supportsCanvasFilter(ctx)) ctx.filter = filter.cssFilter;
+    drawImageCoverWithTransform(ctx, img, rect.x, rect.y, rect.width, rect.height, transform, radius);
+  }
+  ctx.restore();
+
+  if (!supportsCanvasFilter(ctx) && filter.monoFallback) {
+    applyMonoFallback(ctx, rect);
+  }
+  applyFilterOverlays(ctx, rect, filter);
+  applyEffect(ctx, rect, effectId);
+};
+
+const drawThemeBackground = (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  preset: FrameVisualPreset,
+  customization: CustomizationState
+) => {
+  ctx.fillStyle = customization.frameOverrides.backgroundColor || preset.backgroundColor;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (preset.themeId === 'checkerboard') {
+    const size = canvas.width / 12;
+    ctx.fillStyle = 'rgba(0,0,0,0.08)';
+    for (let y = 0; y < canvas.height; y += size) {
+      for (let x = 0; x < canvas.width; x += size) {
+        if ((Math.floor(x / size) + Math.floor(y / size)) % 2 === 0) {
+          ctx.fillRect(x, y, size, size);
+        }
+      }
+    }
+  }
+};
+
+const drawSlotBorder = (
+  ctx: CanvasRenderingContext2D,
+  slot: PhotoSlot,
+  radius: number,
+  preset: FrameVisualPreset
+) => {
+  ctx.save();
+  if (preset.themeId === 'studio-neon') {
+    ctx.strokeStyle = '#FF007F';
+    ctx.lineWidth = 6;
+    ctx.shadowColor = '#FF007F';
+    ctx.shadowBlur = 18;
+  } else {
+    ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+    ctx.lineWidth = 2;
+  }
+  ctx.beginPath();
+  ctx.roundRect(slot.x, slot.y, slot.width, slot.height, radius);
+  ctx.stroke();
+  ctx.restore();
+};
+
+const drawSprockets = (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  layoutId: FrameLayout,
+  variant: 'classic' | 'dense'
+) => {
+  const isStrip = layoutId === 'strip-4';
+  const count = variant === 'dense' ? (isStrip ? 42 : 28) : (isStrip ? 30 : 18);
+  const sprocketW = variant === 'dense' ? canvas.width * 0.022 : canvas.width * 0.02;
+  const sprocketH = variant === 'dense' ? canvas.height / count * 0.48 : canvas.height / count * 0.42;
+  const spacing = canvas.height / count;
+  const leftX = variant === 'dense' ? canvas.width * 0.16 : canvas.width * 0.025;
+  const rightX = variant === 'dense' ? canvas.width * 0.91 : canvas.width * 0.975;
+
+  ctx.save();
+  ctx.fillStyle = variant === 'dense' ? '#EFEFE8' : '#000000';
+  for (let i = 0; i < count; i += 1) {
+    const y = i * spacing + (spacing - sprocketH) / 2;
+    [leftX, rightX].forEach((x) => {
+      ctx.beginPath();
+      ctx.roundRect(x - sprocketW / 2, y, sprocketW, sprocketH, 6);
+      ctx.fill();
+    });
+  }
+  ctx.restore();
+};
+
+const drawThemeOverlays = (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  layoutId: FrameLayout,
+  preset: FrameVisualPreset,
+  derived: DerivedLayout
+) => {
+  if (preset.themeId === 'classic-film') {
+    drawSprockets(ctx, canvas, layoutId, 'classic');
+    ctx.save();
+    ctx.fillStyle = '#D5AA47';
+    ctx.font = `600 ${layoutId === 'strip-4' ? 24 : 30}px "JetBrains Mono", monospace`;
+    ctx.textAlign = 'center';
+    for (let i = 0; i < derived.photoSlots.length; i += 1) {
+      const slot = derived.photoSlots[i];
+      ctx.fillText(`LNG ${String(i + 1).padStart(2, '0')}`, slot.x + slot.width / 2, slot.y - 20);
+    }
+    ctx.restore();
+  }
+
+  if (preset.themeId === 'film-35mm') {
+    drawSprockets(ctx, canvas, layoutId, 'dense');
+    ctx.save();
+    ctx.fillStyle = '#F3F0E7';
+    ctx.font = `700 ${layoutId === 'strip-4' ? 34 : 40}px "JetBrains Mono", monospace`;
+    ctx.textAlign = 'center';
+    ctx.translate(canvas.width * 0.065, canvas.height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText(BRAND.wordmark, 0, 0);
+    ctx.restore();
+  }
+
+  if (preset.themeId === 'vintage-paper') {
+    const noiseCanvas = createNoiseCanvas(128, 128, 0.06);
+    const pattern = ctx.createPattern(noiseCanvas, 'repeat');
+    if (pattern) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+    noiseCanvas.width = 0;
+    noiseCanvas.height = 0;
+  }
+};
+
+const fontForChoice = (fontFamily: string) => {
+  if (fontFamily === 'Playfair Display') return '"Playfair Display", Georgia, serif';
+  if (fontFamily === 'JetBrains Mono') return '"JetBrains Mono", monospace';
+  if (fontFamily === 'Great Vibes') return '"Great Vibes", cursive';
+  return 'Inter, -apple-system, sans-serif';
+};
+
+const drawCaption = (
+  ctx: CanvasRenderingContext2D,
+  customization: CustomizationState,
+  preset: FrameVisualPreset,
+  derived: DerivedLayout
+) => {
+  const text = customization.caption.text.trim().slice(0, 24);
+  if (!text) return;
+
+  const style = preset.captionStyle;
+  const isThemeCaption = !!style;
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = style?.color || preset.textColor || '#1A1A1A';
+  const fontFamily = style?.fontFamily || fontForChoice(customization.caption.fontFamily);
+  const fontSize = derived.id === 'strip-4' ? 28 : 38;
+  ctx.font = `${isThemeCaption ? '700' : '600'} ${fontSize}px ${fontFamily}`;
+  if ('letterSpacing' in ctx) {
+    (ctx as any).letterSpacing = style?.letterSpacing || (customization.caption.fontFamily === 'Great Vibes' ? '0.02em' : '0.12em');
+  }
+  const captionText = (style?.textTransform || 'uppercase') === 'uppercase' ? text.toUpperCase() : text;
+  derived.gapRects.forEach((gap) => {
+    if (gap.height >= 18) {
+      ctx.fillText(captionText, gap.x + gap.width / 2, gap.y + gap.height / 2);
+    }
+  });
+  ctx.restore();
+};
+
+const drawFooterBranding = (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  layoutId: FrameLayout,
+  preset: FrameVisualPreset
+) => {
+  const isStrip = layoutId === 'strip-4';
+  const y = isStrip ? canvas.height - 78 : canvas.height - 92;
+  const color = preset.textColor || '#1A1A1A';
+
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = color;
+  if ((preset.brandingMode || 'footer-full') === 'footer-full') {
+    ctx.font = `700 ${isStrip ? 36 : 46}px Inter, -apple-system, sans-serif`;
+    if ('letterSpacing' in ctx) (ctx as any).letterSpacing = '0.28em';
+    ctx.fillText(BRAND.wordmark, canvas.width / 2, y);
+    ctx.globalAlpha = 0.72;
+    ctx.font = `500 ${isStrip ? 22 : 28}px Inter, -apple-system, sans-serif`;
+    if ('letterSpacing' in ctx) (ctx as any).letterSpacing = '0.14em';
+    ctx.fillText(BRAND.url, canvas.width / 2, y + (isStrip ? 42 : 52));
+  } else {
+    ctx.globalAlpha = 0.78;
+    ctx.font = `600 ${isStrip ? 24 : 30}px Inter, -apple-system, sans-serif`;
+    if ('letterSpacing' in ctx) (ctx as any).letterSpacing = '0.14em';
+    ctx.fillText(BRAND.url, canvas.width / 2, y + 24);
+  }
+  ctx.restore();
+};
+
+export const drawBrandWatermark = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, height - 58, width, 58);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.font = '700 15px Inter, -apple-system, sans-serif';
+  ctx.fillText(BRAND.wordmark, 18, height - 34);
+  ctx.globalAlpha = 0.72;
+  ctx.font = '500 12px Inter, -apple-system, sans-serif';
+  ctx.fillText(BRAND.url, 18, height - 16);
+  ctx.restore();
+};
+
+const drawOuterBorder = (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  preset: FrameVisualPreset,
+  borderPx: number
+) => {
+  if (borderPx <= 0) return;
+  ctx.save();
+  if (preset.themeId === 'studio-neon') {
+    ctx.strokeStyle = '#00F0FF';
+    ctx.shadowColor = '#00F0FF';
+    ctx.shadowBlur = 24;
+  } else {
+    ctx.strokeStyle = preset.borderColor || 'rgba(0,0,0,0.12)';
+  }
+  ctx.lineWidth = borderPx;
+  ctx.strokeRect(borderPx / 2, borderPx / 2, canvas.width - borderPx, canvas.height - borderPx);
+  ctx.restore();
+};
+
+const drawStickers = async (
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  placedStickers: PlacedSticker[]
+) => {
+  await Promise.all(
+    placedStickers.map(async (sticker) => {
+      const asset = STICKER_ASSETS.find((item) => item.id === sticker.assetId);
+      if (!asset) return;
+      const img = await loadImage(asset.src);
+      const width = STICKER_SIZE_FRACTIONS[sticker.size] * canvas.width;
+      const height = width * (img.height / img.width);
+      const x = Math.max(0, Math.min(canvas.width, sticker.cx * canvas.width)) - width / 2;
+      const y = Math.max(0, Math.min(canvas.height, sticker.cy * canvas.height)) - height / 2;
+      ctx.drawImage(img, x, y, width, height);
+    })
+  );
+};
+
+export const compileFrameCanvas = async (
+  selectedPhotos: CapturedPhoto[],
+  customization: CustomizationState,
+  opts: { layoutOverride?: FrameLayout } = {}
 ): Promise<HTMLCanvasElement> => {
-  // Wait for web fonts (e.g. Playfair Display, Great Vibes) to be fully loaded
   if (typeof document !== 'undefined' && 'fonts' in document) {
     try {
       await document.fonts.ready;
@@ -127,270 +535,45 @@ export const compileFrameCanvas = async (
     }
   }
 
-  const currentLayout =
-    LAYOUT_TEMPLATES.find((t) => t.id === layoutId) || LAYOUT_TEMPLATES[0];
-  const currentPreset =
-    FRAME_VISUAL_PRESETS.find((p) => p.id === frameId) || FRAME_VISUAL_PRESETS[0];
-
-  const canvas = document.createElement('canvas');
-  canvas.width = currentLayout.outputWidth;
-  canvas.height = currentLayout.outputHeight;
-
-  const ctx = canvas.getContext('2d');
-  if (!ctx) {
-    throw new Error('Could not get 2D context');
-  }
-
-  // 1. Draw Background
-  ctx.fillStyle = currentPreset.backgroundColor;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // 2. Prepare Display Photos (filling with placeholder if < 4)
-  const displayPhotos = [...selectedPhotos];
-  while (displayPhotos.length < 4) {
-    displayPhotos.push({
-      id: `placeholder-${displayPhotos.length}`,
-      src: 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" fill="%23e9e8e7"></svg>',
-      capturedAt: Date.now(),
-      crop: { x: 0, y: 0, width: 600, height: 800, aspectRatio: '3:4' },
-    });
-  }
-
-  // 3. Load Images in parallel
-  const loadedImages = await Promise.all(
-    displayPhotos.map((photo) => loadImage(photo.src))
+  const layoutId = opts.layoutOverride || customization.layout;
+  const template = getLayout(layoutId);
+  const preset = getPreset(customization.frameId);
+  const derived = deriveLayout(
+    template,
+    customization.frameOverrides,
+    preset.geometryVariant || 'standard'
   );
+  const canvas = document.createElement('canvas');
+  canvas.width = derived.outputWidth;
+  canvas.height = derived.outputHeight;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Could not get 2D context');
 
-  // 4. Draw each photo into its slot with transforms
-  const filterString = getCanvasFilter(filterId);
-  const slotRadius = 8; // 8px proportional corner rounding for high-res slots
+  drawThemeBackground(ctx, canvas, preset, customization);
 
-  currentLayout.photoSlots.forEach((slot, index) => {
+  const displayPhotos = normalizePhotos(selectedPhotos);
+  const loadedImages = await Promise.all(displayPhotos.map((photo) => loadImage(photo.src)));
+
+  derived.photoSlots.forEach((slot, index) => {
     const photo = displayPhotos[index];
-    const img = loadedImages[index];
-    const transform = photoTransforms[photo.id] || { zoom: 1, offsetX: 0, offsetY: 0 };
-
-    if (img) {
-      ctx.save();
-      // Apply filter for photos
-      ctx.filter = filterString;
-      
-      // Draw image with zoom and pan transforms
-      drawImageCoverWithTransform(ctx, img, slot.x, slot.y, slot.width, slot.height, transform, slotRadius);
-      
-      ctx.restore();
-
-      // Render borders based on preset style
-      if (currentPreset.themeId === 'studio-neon') {
-        ctx.save();
-        ctx.strokeStyle = '#FF007F'; // Neon Pink glow stroke for slot
-        ctx.lineWidth = 6;
-        ctx.shadowColor = '#FF007F';
-        ctx.shadowBlur = 18;
-        ctx.beginPath();
-        ctx.roundRect(slot.x, slot.y, slot.width, slot.height, slotRadius);
-        ctx.stroke();
-        ctx.restore();
-      } else {
-        // Standard subtle border
-        ctx.strokeStyle = 'rgba(0,0,0,0.05)';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.roundRect(slot.x, slot.y, slot.width, slot.height, slotRadius);
-        ctx.stroke();
-      }
-    }
+    const transform = customization.photoTransforms[photo.id] || { zoom: 1, offsetX: 0, offsetY: 0 };
+    drawPhotoWithLook(
+      ctx,
+      loadedImages[index],
+      { x: slot.x, y: slot.y, width: slot.width, height: slot.height },
+      transform,
+      customization.filterId,
+      customization.effectId,
+      derived.slotRadius
+    );
+    drawSlotBorder(ctx, slot, derived.slotRadius, preset);
   });
 
-  // 5. Draw Themed Frame Graphics / Overlays
-  if (currentPreset.themeId === 'classic-film') {
-    ctx.save();
-    // Draw sprocket holes in the left and right margins
-    ctx.fillStyle = '#000000'; // Draw holes as dark black cutouts
-    const isStrip = layoutId === 'strip-4';
-    const numSprockets = isStrip ? 28 : 16;
-    const sprocketSpacing = canvas.height / numSprockets;
-    const sprocketW = 24;
-    const sprocketH = 38;
-    const sprocketRadius = 6;
-    
-    // Margins offset
-    const leftMarginCenter = isStrip ? 30 : 50;
-    const rightMarginCenter = isStrip ? (canvas.width - 30) : (canvas.width - 50);
-
-    for (let i = 0; i < numSprockets; i++) {
-      const sy = i * sprocketSpacing + (sprocketSpacing - sprocketH) / 2;
-      
-      // Left side hole
-      ctx.beginPath();
-      ctx.roundRect(leftMarginCenter - sprocketW / 2, sy, sprocketW, sprocketH, sprocketRadius);
-      ctx.fill();
-
-      // Right side hole
-      ctx.beginPath();
-      ctx.roundRect(rightMarginCenter - sprocketW / 2, sy, sprocketW, sprocketH, sprocketRadius);
-      ctx.fill();
-    }
-    ctx.restore();
-  } else if (currentPreset.themeId === 'vintage-paper') {
-    // Draw Vintage Texture and Vignette Overlay
-    ctx.save();
-    
-    // 1. Noise grain
-    const noiseCanvas = createNoiseCanvas(128, 128, 0.07);
-    const pattern = ctx.createPattern(noiseCanvas, 'repeat');
-    if (pattern) {
-      ctx.fillStyle = pattern;
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    
-    // Clean up temporary noise canvas memory
-    noiseCanvas.width = 0;
-    noiseCanvas.height = 0;
-    
-    // 2. Vignette shadow overlay
-    ctx.globalCompositeOperation = 'multiply';
-    const vignette = ctx.createRadialGradient(
-      canvas.width / 2,
-      canvas.height / 2,
-      canvas.width * 0.45,
-      canvas.width / 2,
-      canvas.height / 2,
-      canvas.width * 0.8
-    );
-    vignette.addColorStop(0, 'rgba(0,0,0,0)');
-    vignette.addColorStop(1, 'rgba(92, 74, 60, 0.15)'); // Warm brown vignette edge
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    
-    ctx.restore();
-  }
-
-  // 6. Draw Outer Border (if specified by preset)
-  if (currentPreset.themeId === 'studio-neon') {
-    ctx.save();
-    ctx.strokeStyle = '#00F0FF'; // Cyber cyan outer frame glow
-    ctx.lineWidth = 14;
-    ctx.shadowColor = '#00F0FF';
-    ctx.shadowBlur = 24;
-    ctx.strokeRect(7, 7, canvas.width - 14, canvas.height - 14);
-    ctx.restore();
-  } else if (currentPreset.borderColor) {
-    ctx.strokeStyle = currentPreset.borderColor;
-    const borderThickness = layoutId === 'strip-4' ? 6 : 8;
-    ctx.lineWidth = borderThickness;
-    ctx.strokeRect(
-      borderThickness / 2,
-      borderThickness / 2,
-      canvas.width - borderThickness,
-      canvas.height - borderThickness
-    );
-  }
-
-  // 7. Draw Custom Signature Footer
-  ctx.save();
-  
-  // Custom font matching
-  let fontFamily = 'Inter, -apple-system, sans-serif';
-  let isCursive = false;
-  
-  if (footer?.fontFamily === 'Playfair Display') {
-    fontFamily = '"Playfair Display", Georgia, serif';
-  } else if (footer?.fontFamily === 'JetBrains Mono') {
-    fontFamily = '"JetBrains Mono", monospace';
-  } else if (footer?.fontFamily === 'Great Vibes') {
-    fontFamily = '"Great Vibes", cursive';
-    isCursive = true;
-  }
-
-  const baseColor = footer?.color || currentPreset.textColor || '#000000';
-  ctx.fillStyle = baseColor;
-  ctx.textBaseline = 'middle';
-  
-  // Custom alignment
-  let textAlign: CanvasTextAlign = 'center';
-  let textX = canvas.width / 2;
-  const isStrip = layoutId === 'strip-4';
-
-  if (footer?.alignment === 'left') {
-    textAlign = 'left';
-    textX = isStrip ? 80 : 120;
-  } else if (footer?.alignment === 'right') {
-    textAlign = 'right';
-    textX = isStrip ? (canvas.width - 80) : (canvas.width - 120);
-  }
-  ctx.textAlign = textAlign;
-
-  // Font size configuration
-  const fontMultiplier = isCursive ? 1.5 : 1.0;
-  const baseFontSize = isStrip ? 38 : 48;
-  const finalFontSize = Math.round(baseFontSize * fontMultiplier);
-  ctx.font = `${isCursive ? '400' : '600'} ${finalFontSize}px ${fontFamily}`;
-
-  // Apply wide letter spacing (disable for script cursives to avoid breakages)
-  if ('letterSpacing' in ctx) {
-    (ctx as any).letterSpacing = isCursive ? '0.05em' : '0.25em';
-  }
-
-  // Calculate text positions
-  let textY = 0;
-  let dateY = 0;
-
-  if (isStrip) {
-    const lastSlotBottom = 2630 + 810; // 3440px
-    textY = lastSlotBottom + 65;
-    dateY = textY + 48;
-  } else {
-    const lastSlotBottom = 875 + 645; // 1520px
-    textY = lastSlotBottom + 160;
-    dateY = textY + 90;
-  }
-
-  // Draw Signature line
-  const signatureText = footer?.text || 'LUNAGI STUDIOS';
-  ctx.fillText(signatureText, textX, textY);
-
-  // Optional Date Stamp
-  if (footer?.showDate) {
-    ctx.restore();
-    ctx.save();
-    ctx.textAlign = textAlign;
-    ctx.fillStyle = baseColor;
-    ctx.globalAlpha = 0.7; // slight fade for secondary text
-    ctx.textBaseline = 'middle';
-    
-    // Choose proportional font size and family for date
-    const dateFontSize = isStrip ? 24 : 32;
-    const dateFontFamily = footer?.fontFamily === 'JetBrains Mono' ? '"JetBrains Mono", monospace' : 'Inter, -apple-system, sans-serif';
-    ctx.font = `500 ${dateFontSize}px ${dateFontFamily}`;
-    
-    if ('letterSpacing' in ctx) {
-      (ctx as any).letterSpacing = '0.15em';
-    }
-
-    const firstPhotoDate = selectedPhotos[0]?.capturedAt
-      ? new Date(selectedPhotos[0].capturedAt)
-      : new Date();
-    const yyyy = firstPhotoDate.getFullYear();
-    const mm = String(firstPhotoDate.getMonth() + 1).padStart(2, '0');
-    const dd = String(firstPhotoDate.getDate()).padStart(2, '0');
-    const dateStr = `${yyyy}.${mm}.${dd}`;
-
-    ctx.fillText(dateStr, textX, dateY);
-  }
-
-  // 8. Draw Transparent Overlay PNG from Pinterest (if specified)
-  if (currentPreset.overlayImageSrc) {
-    try {
-      const overlayImg = await loadImage(currentPreset.overlayImageSrc);
-      ctx.drawImage(overlayImg, 0, 0, canvas.width, canvas.height);
-    } catch (err) {
-      console.error('Error drawing public transparent overlay frame image:', err);
-    }
-  }
-
-  ctx.restore();
+  drawCaption(ctx, customization, preset, derived);
+  drawThemeOverlays(ctx, canvas, layoutId, preset, derived);
+  drawOuterBorder(ctx, canvas, preset, derived.borderPx);
+  await drawStickers(ctx, canvas, customization.placedStickers);
+  drawFooterBranding(ctx, canvas, layoutId, preset);
 
   return canvas;
 };
